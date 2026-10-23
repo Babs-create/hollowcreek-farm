@@ -151,11 +151,29 @@ button:focus-visible{outline:2px solid var(--straw);outline-offset:2px}
   #toasts{bottom:calc(132px + env(safe-area-inset-bottom,0px))}
 }
 @media (prefers-reduced-motion:reduce){.toast{animation:none}.xpbar i{transition:none}}
-.offline #hostBtn,.offline #joinOpen,.offline #joinBox,.offline .nick-field,.offline .score.wr,.offline #resWorld{display:none!important}
-.offline .scores{grid-template-columns:1fr}
+.no-records .score.wr,.no-records #resWorld{display:none!important}
+.no-records .scores{grid-template-columns:1fr}
 </style>
 </head>
 <body>
+<!--
+  ============================================================
+  WORLD RECORD SETUP (optional)
+  Lobbies work with no setup: players connect directly.
+  For a shared world record, paste your Firebase web app
+  config between the braces below. Leave it empty and the
+  world record box is simply hidden.
+  ============================================================
+-->
+<script>
+window.HOLLOWCREEK_FIREBASE = {
+  // apiKey: "...",
+  // authDomain: "...",
+  // databaseURL: "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
+  // projectId: "...",
+  // appId: "..."
+};
+</script>
 <canvas id="world" aria-label="Farm map"></canvas>
 <div id="hud">
   <div class="top">
@@ -1777,7 +1795,143 @@ function endRun() {
 
 
 /* ---------------- Online: world record + co-op lobbies ---------------- */
-const cap = name => (window.claude && typeof window.claude.use === 'function') ? Promise.resolve(window.claude.use(name)).catch(() => null) : Promise.resolve(null);
+/* ---- Online backend: Claude when hosted there, otherwise Firebase Realtime Database ---- */
+const FB_CFG = window.HOLLOWCREEK_FIREBASE && window.HOLLOWCREEK_FIREBASE.databaseURL ? window.HOLLOWCREEK_FIREBASE : null;
+const IN_CLAUDE = !!(window.claude && typeof window.claude.use === 'function');
+const NET_RATE = 0.1;
+let fbP = null;
+function loadFirebase() {
+  if (fbP) return fbP;
+  fbP = new Promise(res => {
+    if (!FB_CFG) return res(null);
+    const load = src => new Promise((ok, no) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = no; document.head.appendChild(el); });
+    load('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js')
+      .then(() => load('https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js'))
+      .then(() => { const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(FB_CFG); res(firebase.database(app)); })
+      .catch(() => res(null));
+  });
+  return fbP;
+}
+function playerId() {
+  let id = lsGet('hollowcreek-player-id');
+  if (!/^p[a-z0-9]{10,20}$/.test(id || '')) { id = 'p' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); lsSet('hollowcreek-player-id', id); }
+  return id;
+}
+/* Lobbies outside Claude: direct browser-to-browser connections (PeerJS / WebRTC).
+   The host's browser is the hub: guests connect to it, and it relays everyone's state. */
+let peerLibP = null;
+function loadPeerJS() {
+  if (peerLibP) return peerLibP;
+  peerLibP = window.Peer ? Promise.resolve(true) : new Promise(res => {
+    const el = document.createElement('script');
+    el.src = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
+    el.onload = () => res(typeof window.Peer === 'function'); el.onerror = () => res(false);
+    document.head.appendChild(el);
+  });
+  return peerLibP;
+}
+function p2pRoomNS() {
+  return {
+    join: (name, role) => new Promise((resolve, reject) => {
+      const hostId = 'hollowcreek-' + name;
+      const state = {}, others = new Map(), conns = new Map();
+      let alive = true, settled = false, hostConn = null, peer;
+      try { peer = role === 'host' ? new Peer(hostId, { debug: 0 }) : new Peer({ debug: 0 }); }
+      catch (e) { reject({ code: 'upstream_error' }); return; }
+      const fail = code => { if (settled) return; settled = true; alive = false; clearTimeout(timer); try { peer.destroy(); } catch (e) { } reject({ code }); };
+      const ok = api => { if (settled) return; settled = true; clearTimeout(timer); resolve(api); };
+      const timer = setTimeout(() => fail('upstream_error'), 15000);
+      const send = (c, m) => { try { if (c && c.open) c.send(m); } catch (e) { } };
+      const tidy = () => { for (const k in state) if (state[k] == null) delete state[k]; };
+      peer.on('disconnected', () => { if (alive && !peer.destroyed) { try { peer.reconnect(); } catch (e) { } } });
+      peer.on('error', e => {
+        const t = e && e.type;
+        if (t === 'unavailable-id') fail('taken');
+        else if (t === 'peer-unavailable') others.clear();
+        else if (!settled) fail('upstream_error');
+      });
+      const api = {
+        name,
+        presence: async patch => {
+          if (!alive) return;
+          Object.assign(state, patch); tidy();
+          if (role === 'host') { for (const c of conns.values()) send(c, { t: 'p', id: 'host', pr: state }); }
+          else send(hostConn, { t: 'p', pr: state });
+        },
+        peers: () => {
+          const out = [{ peer: peer.id || 'me', sameTab: true, isMe: true, presence: state }];
+          for (const [k, pr] of others) out.push({ peer: k, sameTab: false, isMe: false, presence: pr });
+          return out;
+        },
+        leave: async () => { if (!alive) return; alive = false; try { peer.destroy(); } catch (e) { } },
+      };
+      if (role === 'host') {
+        peer.on('open', () => ok(api));
+        peer.on('connection', c => {
+          if (conns.size >= 7) { c.on('open', () => { try { c.close(); } catch (e) { } }); return; }
+          c.on('open', () => {
+            conns.set(c.peer, c);
+            send(c, { t: 'p', id: 'host', pr: state });
+            for (const [k, pr] of others) send(c, { t: 'p', id: k, pr });
+          });
+          c.on('data', m => {
+            if (!alive || !m || m.t !== 'p' || !m.pr || typeof m.pr !== 'object') return;
+            others.set(c.peer, m.pr);
+            for (const [k, o] of conns) if (k !== c.peer) send(o, { t: 'p', id: c.peer, pr: m.pr });
+          });
+          const gone = () => {
+            if (!conns.has(c.peer) && !others.has(c.peer)) return;
+            conns.delete(c.peer); others.delete(c.peer);
+            for (const o of conns.values()) send(o, { t: 'x', id: c.peer });
+          };
+          c.on('close', gone); c.on('error', gone);
+        });
+      } else {
+        peer.on('open', () => {
+          hostConn = peer.connect(hostId, { reliable: true, serialization: 'json' });
+          hostConn.on('data', m => {
+            if (!alive || !m) return;
+            if (m.t === 'p' && typeof m.id === 'string' && m.pr && typeof m.pr === 'object') { if (m.id !== peer.id) others.set(m.id, m.pr); }
+            else if (m.t === 'x') others.delete(m.id);
+          });
+          const gone = () => others.clear();
+          hostConn.on('close', gone); hostConn.on('error', gone);
+          ok(api);
+        });
+      }
+    }),
+  };
+}
+function fbDbNS(fdb) {
+  return {
+    collection: c => ({
+      orderBy: f => ({
+        limit: n => ({
+          onSnapshot: (cb, err) => {
+            const q = fdb.ref(c).orderByChild(f).limitToLast(n);
+            const h = snap => { const docs = []; snap.forEach(ch => { const v = ch.val(); docs.unshift({ id: ch.key, exists: true, data: () => v }); }); cb({ docs, size: docs.length, empty: !docs.length }); };
+            q.on('value', h, e => err && err(e));
+            return () => q.off('value', h);
+          },
+        }),
+      }),
+    }),
+    doc: path => ({
+      get: async () => { const sn = await fdb.ref(path).get(); const v = sn.val(); return { exists: sn.exists(), data: () => v }; },
+      set: async d => fdb.ref(path).set(Object.assign({}, d, { name: nick() })),
+    }),
+  };
+}
+const cap = name => {
+  if (IN_CLAUDE) return Promise.resolve(window.claude.use(name)).catch(() => null);
+  if (name === 'room') return loadPeerJS().then(ok => ok ? p2pRoomNS() : null);
+  return loadFirebase().then(fdb => {
+    if (!fdb) return null;
+    if (name === 'db') return fbDbNS(fdb);
+    if (name === 'user') return { id: async () => playerId(), profiles: async () => ({}) };
+    return null;
+  });
+};
 const NICK_KEY = 'hollow-creek-farm-nick', HOST_CODE_KEY = 'hollow-creek-farm-host-code';
 const FCOL = ['#c4473a', '#3b8ed0', '#4caf50', '#9b5aa8', '#e08a2a', '#2fb5a8', '#d85a9a', '#d9b43a'];
 const RES = ['coins', 'xp', 'lvl', 'tools', 'water', 'seeds', 'produce', 'items', 'st', 'goal', 'sel', 'seedSel'];
@@ -1958,7 +2112,7 @@ function netTick(dt) {
     else if ((NET.hostMissing += dt) > 6) { NET.hostPaused = false; pauseEl.hidden = true; openMenu('The host closed the lobby. Your coins and items are saved for next time.', true); return; }
   }
   NET.presAcc += dt; NET.snapAcc += dt;
-  if (NET.presAcc < 0.1) return;
+  if (NET.presAcc < NET_RATE) return;
   NET.presAcc = 0;
   const pres = { r: NET.role === 'host' ? 'h' : 'g', n: nick(), c: NET.col, p: [Math.round(player.x), Math.round(player.y), Math.max(0, DIRS.indexOf(player.dir)), player.moving ? 1 : 0], o: NET.ops };
   if (NET.role === 'host') {
@@ -1978,7 +2132,7 @@ function leaveLobby() {
   NET.pending.clear(); NET.hostTouch.clear(); NET.pendOwn.clear(); NET.others.clear(); NET.crowMap.clear(); curChunk = null; crows = [];
 }
 
-const NO_ROOM = 'Lobbies need you signed in to Claude with this game shared with you. They are not available in this view.';
+const NO_ROOM = IN_CLAUDE ? 'Lobbies need you signed in to Claude with this game shared with you. They are not available in this view.' : 'Could not load the lobby system. Check your internet connection and try again.';
 function makeCode() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = ''; for (let k = 0; k < 5; k++) c += A[Math.floor(Math.random() * A.length)]; return c; }
 function saveNick() { const v = clean($('#nickIn').value, 12); lsSet(NICK_KEY, v); }
 let lobbyBusy = false;
@@ -1988,8 +2142,17 @@ async function hostLobby() {
   try {
     const room = await getRoom(); if (!room) { lobbyMsg(NO_ROOM, true); return; }
     let code = clean(lsGet(HOST_CODE_KEY), 5); if (!/^[A-Z0-9]{5}$/.test(code)) { code = makeCode(); lsSet(HOST_CODE_KEY, code); }
-    let r;
-    try { r = await room.join('hcf-' + code.toLowerCase()); } catch (e) { lobbyMsg('Could not open a lobby right now. Try again in a moment.', true); return; }
+    let r = null;
+    for (let attempt = 0; attempt < 4 && !r; attempt++) {
+      try { r = await room.join('hcf-' + code.toLowerCase(), 'host'); }
+      catch (e) {
+        if (e && e.code === 'taken') {
+          if (attempt === 0) { lobbyMsg('Reopening your lobby...'); await new Promise(res => setTimeout(res, 4000)); }
+          else { code = makeCode(); lsSet(HOST_CODE_KEY, code); }
+        } else { lobbyMsg('Could not open a lobby right now. Check your internet connection and try again.', true); return; }
+      }
+    }
+    if (!r) { lobbyMsg('Could not open a lobby right now. Try again in a moment.', true); return; }
     leaveLobby();
     Object.assign(NET, { role: 'host', code, room: r, col: 0, seq: 0, ops: [] });
     enterGame('relaxed', false);
@@ -2005,7 +2168,7 @@ async function joinLobby() {
     const room = await getRoom(); if (!room) { lobbyMsg(NO_ROOM, true); return; }
     lobbyMsg(`Looking for lobby ${code}...`);
     let r;
-    try { r = await room.join('hcf-' + code.toLowerCase()); } catch (e) { lobbyMsg('Could not connect right now. Try again in a moment.', true); return; }
+    try { r = await room.join('hcf-' + code.toLowerCase(), 'guest'); } catch (e) { lobbyMsg('Could not connect right now. Check your internet connection and try again.', true); return; }
     r.presence({ r: 'w', n: nick() }).catch(() => {});
     const host = await new Promise(res => {
       const t0 = Date.now();
@@ -2015,7 +2178,7 @@ async function joinLobby() {
         if (h || Date.now() - t0 > 9000) { clearInterval(iv); res(h || null); }
       }, 250);
     });
-    if (!host) { r.leave().catch(() => {}); lobbyMsg(`No lobby found with code ${code}. Check the code, and make sure the host is in the game.`, true); return; }
+    if (!host) { r.leave().catch(() => {}); lobbyMsg(`Could not reach lobby ${code}. Check the code and make sure the host is in the game. Some school or work networks block direct connections between players.`, true); return; }
     const used = new Set(r.peers().map(p => p.presence && p.presence.c).filter(Number.isInteger));
     let col = 1; while (used.has(col) && col < FCOL.length - 1) col++;
     leaveLobby();
@@ -2064,9 +2227,10 @@ function renderScores() {
   if (!REC.db) { wv.textContent = 'Offline'; wb.textContent = 'Shows when signed in'; return; }
   if (!REC.top) { wv.textContent = 'None yet'; wb.textContent = 'Be the first'; return; }
   wv.textContent = fmt(REC.top.score);
-  wb.textContent = REC.top.id === REC.uid ? 'Held by you' : 'Held by ' + (REC.topName || 'another farmer');
+  wb.textContent = REC.top.id === REC.uid ? 'Held by you' : 'Held by ' + (REC.top.name || REC.topName || 'another farmer');
 }
 async function resolveTopName() {
+  if (REC.top && REC.top.name) { renderScores(); return; }
   if (!REC.top || !REC.user || REC.top.id === REC.uid) { renderScores(); return; }
   try { const ps = await REC.user.profiles([REC.top.id]); const pr = ps && ps[REC.top.id]; REC.topName = (pr && pr.name) || ''; } catch (e) { REC.topName = ''; }
   renderScores();
@@ -2080,7 +2244,7 @@ async function initRecords() {
   try {
     db.collection('records').orderBy('best', 'desc').limit(1).onSnapshot(snap => {
       const d = snap.docs[0], v = d && d.data();
-      REC.top = d && v && isFinite(+v.best) && +v.best > 0 ? { score: Math.floor(+v.best), id: d.id } : null;
+      REC.top = d && v && isFinite(+v.best) && +v.best > 0 ? { score: Math.floor(+v.best), id: d.id, name: clean(v.name, 12) } : null;
       resolveTopName();
     }, () => {});
   } catch (e) { }
@@ -2101,8 +2265,8 @@ async function submitRecord(score) {
 }
 
 /* ---------------- Boot ---------------- */
-const ONLINE = !!(window.claude && typeof window.claude.use === 'function');
-if (!ONLINE) { document.documentElement.classList.add('offline'); $('#relaxedDesc').textContent = 'No clock. Play as long as you like.'; }
+const ONLINE = true;
+if (!IN_CLAUDE && !FB_CFG) document.documentElement.classList.add('no-records');
 let started = false;
 function start(data) {
   if (started) return; started = true;
