@@ -136,6 +136,18 @@ button:focus-visible{outline:2px solid var(--straw);outline-offset:2px}
 .lobby-msg{color:var(--straw)!important;line-height:1.4}
 .lobby-msg.err{color:#ff9b8a!important}
 .lobby-chip{pointer-events:auto;font-family:var(--f-display);font-size:14px;background:var(--good);color:#14240c;border:0;border-radius:6px;padding:3px 9px;cursor:pointer;font-variant-numeric:tabular-nums}
+.fish-card{width:min(420px,100%);text-align:center}
+.fish-bar{height:10px;border-radius:5px;background:var(--denim-2);overflow:hidden;margin:6px 0 14px;box-shadow:inset 0 0 0 1px var(--denim-3)}
+.fish-bar i{display:block;height:100%;width:100%;background:var(--good);transition:background .2s}
+.fish-bar i.low{background:var(--barn)}
+.fish-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;max-width:340px;margin:0 auto;touch-action:manipulation}
+.fish-grid button{aspect-ratio:1;border-radius:10px;border:2px solid #3b78ab;background:#2c5f8c;cursor:pointer;padding:0;position:relative;overflow:hidden;-webkit-tap-highlight-color:transparent}
+.fish-grid button::after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(135deg,rgba(255,255,255,.06) 0 6px,transparent 6px 12px)}
+.fish-grid button.hot{background:#f2c14e;border-color:#fff3c4;box-shadow:0 0 0 3px rgba(242,193,78,.45),0 0 18px rgba(242,193,78,.7);animation:fishpulse .5s ease-in-out infinite alternate}
+.fish-grid button.done{background:#93d46e;border-color:#cdeeb8;animation:none}
+.fish-grid button.miss{background:#d0503f;border-color:#ffb3a8}
+@keyframes fishpulse{from{transform:scale(.94)}to{transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){.fish-grid button.hot{animation:none}}
 .res-stats dt{color:var(--muted)} .res-stats dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 @media (max-width:640px){
   #mini{width:112px;height:84px}
@@ -160,19 +172,13 @@ button:focus-visible{outline:2px solid var(--straw);outline-offset:2px}
   ============================================================
   WORLD RECORD SETUP (optional)
   Lobbies work with no setup: players connect directly.
-  For a shared world record, paste your Firebase web app
-  config between the braces below. Leave it empty and the
-  world record box is simply hidden.
+  For a shared world record, paste the web app URL of your
+  Google Sheet script between the quotes below (it ends in
+  /exec). Leave it empty and the world record box is hidden.
   ============================================================
 -->
 <script>
-window.HOLLOWCREEK_FIREBASE = {
-  // apiKey: "...",
-  // authDomain: "...",
-  // databaseURL: "https://YOUR-PROJECT-default-rtdb.firebaseio.com",
-  // projectId: "...",
-  // appId: "..."
-};
+window.HOLLOWCREEK_RECORDS_URL = "";
 </script>
 <canvas id="world" aria-label="Farm map"></canvas>
 <div id="hud">
@@ -268,6 +274,15 @@ window.HOLLOWCREEK_FIREBASE = {
   </div>
 </div>
 
+<div id="fishGame" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="fishTitle">
+  <div class="panel modal-card fish-card">
+    <h2 id="fishTitle">Fish on!</h2>
+    <p class="note" id="fishNote">Tap every glowing spot before the line snaps.</p>
+    <div class="fish-bar"><i id="fishTime"></i></div>
+    <div class="fish-grid" id="fishGrid"></div>
+  </div>
+</div>
+
 <div id="modeMenu" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="modeTitle">
   <div class="panel modal-card">
     <h2 id="modeTitle">Hollowcreek Farm</h2>
@@ -292,7 +307,7 @@ window.HOLLOWCREEK_FIREBASE = {
       </div>
       <div class="mode">
         <h3>1 Hour</h3>
-        <p>One hour on the clock. Finish with as much cash as you can. Unsold crops don't count.</p>
+        <p>One hour on the clock. Finish with as much cash as you can. Unsold crops and fish don't count.</p>
         <div class="scores">
           <div class="score"><span>Personal best</span><b id="pbVal">None yet</b><small></small></div>
           <div class="score wr"><span>World record</span><b id="wrVal">None yet</b><small id="wrBy"></small></div>
@@ -324,7 +339,7 @@ window.HOLLOWCREEK_FIREBASE = {
 <script>
 (() => {
 'use strict';
-const T = 32, W = 64, H = 48;
+const T = 32, W = 64, HV = 48, H = 73;
 const $ = s => document.querySelector(s);
 const fmt = n => '$' + Math.floor(n).toLocaleString('en-US');
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -358,6 +373,28 @@ const CROPS = [
   { id: 'rose', name: 'Crystal Rose', seed: 8000, grow: 420, regrow: 0, sell: 22000, xp: 300, lvl: 18, col: '#8fd8f0' },
 ];
 const CROP = Object.fromEntries(CROPS.map(c => [c.id, c]));
+CROP.cherry = { id: 'cherry', name: 'Crystal Cherry', sell: 100000, xp: 25, col: '#ff9ad5' };
+const CHERRY_REGROW = 60;
+// Fish: lake (the pond by the farmhouse) and river (the creek). n = glowing spots to tap, time = seconds.
+const FISH = {
+  lake: [
+    { id: 'bluegill', name: 'Bluegill', sell: 30, xp: 2, w: 40, n: 3, time: 3.2, col: '#5b8fb9', belly: '#f2b84b' },
+    { id: 'perch', name: 'Yellow Perch', sell: 55, xp: 3, w: 28, n: 4, time: 3.2, col: '#c9b341', belly: '#f4e7a8', stripes: '#5b6b2a' },
+    { id: 'lmbass', name: 'Largemouth Bass', sell: 140, xp: 6, w: 16, n: 5, time: 3.1, col: '#4f7d3a', belly: '#d9e6b8', stripes: '#2f4f22' },
+    { id: 'catfish', name: 'Channel Catfish', sell: 260, xp: 9, w: 10, n: 6, time: 3.0, col: '#7a7f8a', belly: '#d8d8d0', whiskers: 1 },
+    { id: 'koi', name: 'Golden Koi', sell: 1800, xp: 30, w: 3, n: 8, time: 3.0, col: '#f2a33a', belly: '#fff1d6', spots: '#ffffff', rare: 1 },
+  ],
+  river: [
+    { id: 'chub', name: 'Creek Chub', sell: 25, xp: 2, w: 38, n: 3, time: 3.0, col: '#8f9aa6', belly: '#e6e9ec' },
+    { id: 'brooktrout', name: 'Brook Trout', sell: 80, xp: 4, w: 26, n: 4, time: 2.9, col: '#5c6b3a', belly: '#e8743b', spots: '#f2c14e' },
+    { id: 'smbass', name: 'Smallmouth Bass', sell: 130, xp: 6, w: 18, n: 5, time: 2.9, col: '#8a6a3a', belly: '#e6d2a8', stripes: '#4e3a1c' },
+    { id: 'rainbow', name: 'Rainbow Trout', sell: 300, xp: 10, w: 10, n: 6, time: 2.8, col: '#7f9a8f', belly: '#f2f0e6', stripes: '#e46a8a' },
+    { id: 'muskie', name: 'Muskellunge', sell: 1100, xp: 22, w: 5, n: 7, time: 2.8, col: '#7d8f4a', belly: '#e9ecd4', stripes: '#3f4a22', rare: 1 },
+    { id: 'sturgeon', name: 'Lake Sturgeon', sell: 3000, xp: 45, w: 2, n: 9, time: 3.0, col: '#5a5f68', belly: '#bfc3c8', whiskers: 1, rare: 1 },
+  ],
+};
+const FISHBY = {};
+for (const k in FISH) for (const f of FISH[k]) { FISHBY[f.id] = f; CROP[f.id] = { id: f.id, name: f.name, sell: f.sell, xp: f.xp, col: f.col }; }
 const TALL = new Set(['corn', 'sunflower', 'rose']);
 const UPG = {
   can: { name: 'Watering Can', tiers: [
@@ -369,6 +406,11 @@ const UPG = {
     { label: 'Worn hoe', cost: 0, desc: 'Tills one tile. Rocks and stumps take 3 hits' },
     { label: 'Steel hoe', cost: 220, desc: 'Breaks rocks and stumps in one hit' },
     { label: 'Gold hoe', cost: 1600, desc: 'Tills a 3×3 patch per swing' } ] },
+  rod: { name: 'Fishing Rod', tiers: [
+    { label: 'No rod', cost: 0, desc: 'Buy one to fish the lake and the river' },
+    { label: 'Bamboo rod', cost: 200, desc: 'Fish the lake and the river' },
+    { label: 'Fiberglass rod', cost: 1200, desc: 'A bit more time to land fish, and rare fish bite more often' },
+    { label: 'Gold rod', cost: 6000, desc: 'The most time to land fish and the best odds for rare ones' } ] },
   boots: { name: 'Boots', tiers: [
     { label: 'Old boots', speed: 3.4, cost: 0, desc: 'Walking pace' },
     { label: 'Work boots', speed: 4.6, cost: 120, desc: '35% faster walking' },
@@ -384,6 +426,7 @@ const TOOLS = [
   { k: 'hand', name: 'Basket', key: '1' }, { k: 'hoe', name: 'Hoe', key: '2' }, { k: 'can', name: 'Watering can', key: '3' },
   { k: 'seed', name: 'Seeds', key: '4' }, { k: 'fert', name: 'Fertilizer', key: '5' }, { k: 'scarecrow', name: 'Scarecrow', key: '6' },
   { k: 'sprinkler', name: 'Sprinkler', key: '7' }, { k: 'sprinkler2', name: 'Quality sprinkler', key: '8' },
+  { k: 'rod', name: 'Fishing rod', key: '9' },
 ];
 const GOALS = [
   { text: 'Harvest 3 ripe turnips. Click the sparkling ones with any tool.', n: () => S.st.harv, need: 3, reward: 15 },
@@ -418,14 +461,14 @@ const WELL = I(10, 6), BIN = I(11, 8);
 (function gen() {
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = I(x, y);
-    if (x < 2 || y < 2 || x >= W - 2 || y >= H - 2) terr[i] = TREE;
+    if (x < 2 || y < 2 || x >= W - 2 || y >= HV - 2) terr[i] = TREE;
   }
   for (let y = 2; y <= 8; y++) for (let x = 14; x <= 52; x++) {
     const d = Math.hypot(x - 17, y - 5);
     if (d > 4 && rand() < 0.1) terr[I(x, y)] = TREE;
   }
-  for (let y = 2; y < H - 2; y++) for (let x = 59; x < W - 2; x++) if (rand() < 0.72) terr[I(x, y)] = TREE;
-  for (let y = 44; y < H - 2; y++) for (let x = 2; x < 53; x++) if (rand() < 0.3) terr[I(x, y)] = TREE;
+  for (let y = 2; y < HV - 2; y++) for (let x = 59; x < W - 2; x++) if (rand() < 0.72) terr[I(x, y)] = TREE;
+  for (let y = 44; y < HV - 2; y++) for (let x = 2; x < 53; x++) if (rand() < 0.3) terr[I(x, y)] = TREE;
   for (let y = 2; y <= 9; y++) for (let x = 2; x <= 13; x++) terr[I(x, y)] = G;
   // pond
   for (let y = 2; y <= 8; y++) for (let x = 13; x <= 21; x++) {
@@ -433,7 +476,7 @@ const WELL = I(10, 6), BIN = I(11, 8);
     if (d < 2.4) terr[I(x, y)] = WATER; else if (d < 3.3) terr[I(x, y)] = SAND;
   }
   // creek
-  for (let y = 0; y < H; y++) {
+  for (let y = 0; y < HV; y++) {
     const cx = Math.round(55.5 + Math.sin(y * 0.22) * 1.4);
     for (let dx = -2; dx <= 2; dx++) {
       const x = cx + dx; if (x < 0 || x >= W) continue;
@@ -449,10 +492,98 @@ const WELL = I(10, 6), BIN = I(11, 8);
   setPath(11, 9); setPath(10, 7);
   for (let y = HOUSE.y; y < HOUSE.y + HOUSE.h; y++) for (let x = HOUSE.x; x < HOUSE.x + HOUSE.w; x++) terr[I(x, y)] = BLOCK;
   terr[WELL] = BLOCK; terr[BIN] = BLOCK;
-  for (let i = 0; i < W * H; i++) {
+  for (let i = 0; i < W * HV; i++) {
     if (plotMap[i] >= 0) terr[i] = G;
     else if (terr[i] === G && rand() < 0.07) terr[i] = FLOWER;
   }
+})();
+/* ---- Secret (no hints anywhere in the game) ----
+   Stand at the highest point of the creek you can reach and type "bridge": from then on YOU can walk
+   on that stretch of water. A gap through the far-side trees leads to the map border; walking into it
+   takes you to a hidden clearing with a 5x5 pre-tilled patch. None of it shows on the minimap. */
+const SECRET_PLOT = 16;
+const GARDEN = { x0: 27, y0: 56, w: 9, h: 9 };                 // clearing in the hidden rows
+const GSOIL = { x0: 29, y0: 58, n: 5 };                       // 5x5 patch, cherry tree in the middle
+const CHERRY = I(GSOIL.x0 + 2, GSOIL.y0 + 2);
+const G_ENTRY = I(GARDEN.x0 + 1, GARDEN.y0 + 4), DOOR_W = I(GARDEN.x0 - 1, GARDEN.y0 + 4);
+const SIGN = I(GARDEN.x0, GARDEN.y0 + 3);
+const GARDEN_SOIL = [];
+(function genGarden() {
+  const r = mulberry32(5150);
+  for (let y = HV; y < H; y++) for (let x = 0; x < W; x++) terr[I(x, y)] = TREE;
+  for (let y = GARDEN.y0; y < GARDEN.y0 + GARDEN.h; y++) for (let x = GARDEN.x0; x < GARDEN.x0 + GARDEN.w; x++) {
+    const corner = (x === GARDEN.x0 || x === GARDEN.x0 + GARDEN.w - 1) && (y === GARDEN.y0 || y === GARDEN.y0 + GARDEN.h - 1);
+    terr[I(x, y)] = corner ? TREE : r() < 0.18 ? FLOWER : G;
+  }
+  for (let y = GSOIL.y0; y < GSOIL.y0 + GSOIL.n; y++) for (let x = GSOIL.x0; x < GSOIL.x0 + GSOIL.n; x++) {
+    const i = I(x, y); terr[i] = G;
+    if (i === CHERRY) { terr[i] = TREE; continue; }
+    plotMap[i] = SECRET_PLOT; GARDEN_SOIL.push(i);
+  }
+  // a clear dirt trail out of the clearing, with a signpost beside it
+  terr[DOOR_W] = PATH; terr[DOOR_W - 1] = PATH; terr[DOOR_W - 2] = PATH; terr[G_ENTRY - 1 + 0] = PATH; terr[SIGN] = G;
+})();
+const creekX = y => Math.round(55.5 + Math.sin(y * 0.22) * 1.4);
+const SECRET = (function () {
+  const seen = new Uint8Array(W * H), q = [I(7, 9)]; seen[q[0]] = 1;
+  let best = -1;
+  for (let h = 0; h < q.length; h++) {
+    const i = q[h], x = i % W, y = (i / W) | 0;
+    if (x >= 50 && x + 1 < W && terr[I(x + 1, y)] === WATER && (best < 0 || y < ((best / W) | 0))) best = i;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= W || ny >= HV) continue;
+      const j = I(nx, ny), t = terr[j];
+      if (seen[j] || t === WATER || t === TREE || t === BLOCK) continue;
+      seen[j] = 1; q.push(j);
+    }
+  }
+  if (best < 0) return null;
+  const x = best % W, y = (best / W) | 0, water = new Set();
+  let land = x + 1; for (; land < W && terr[I(land, y)] === WATER; land++) water.add(I(land, y));
+  // The whole far bank becomes forest down to the water, then a winding maze is carved through it
+  // one tile at a time (no grid), so the gaps look like a natural forest.
+  const XR = W - 3, YT = 2, YB = HV - 4, base = terr.slice();
+  const inR = (a, b) => b >= YT && b <= YB && a <= XR && a >= creekX(b) + 2;
+  let mz = null;
+  for (let seed = 777; seed < 877 && !(mz && mz.steps >= 70); seed++) {
+    const r = mulberry32(seed), cut = new Set();
+    const isCut = (a, b) => cut.has(I(a, b)) || (a === land && b < YT);
+    const sx = land, sy = YT;
+    cut.add(I(sx, sy));
+    const stack = [[sx, sy]];
+    while (stack.length) {
+      const [cx, cy] = stack[stack.length - 1];
+      const cand = [];
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        if (!inR(nx, ny) || isCut(nx, ny)) continue;
+        let touching = 0;
+        for (const [ex, ey] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const qx = nx + ex, qy = ny + ey; if ((qx !== cx || qy !== cy) && isCut(qx, qy)) touching++; }
+        if (!touching) cand.push([nx, ny, dy > 0 ? 3 : 1]);
+      }
+      if (!cand.length) { stack.pop(); continue; }
+      let tot = cand.reduce((t, c) => t + c[2], 0), pick = r() * tot, k = 0;
+      while (pick > cand[k][2]) { pick -= cand[k][2]; k++; }
+      const [nx, ny] = cand[Math.min(k, cand.length - 1)];
+      cut.add(I(nx, ny)); stack.push([nx, ny]);
+    }
+    // the way out: the edge tile (next to the border) farthest from the landing
+    const dist = new Map([[I(sx, sy), 0]]), bq = [I(sx, sy)];
+    for (let h = 0; h < bq.length; h++) {
+      const c = bq[h], cx = c % W, cy = (c / W) | 0;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const j = I(cx + dx, cy + dy); if (cut.has(j) && !dist.has(j)) { dist.set(j, dist.get(c) + 1); bq.push(j); } }
+    }
+    let ex = -1, steps = -1;
+    for (const [j, d] of dist) if (j % W === XR && d > steps) { ex = j; steps = d; }
+    if (ex >= 0 && (!mz || steps > mz.steps)) mz = { cut, ex, steps, seed };
+  }
+  for (let yy = 0; yy <= HV - 3; yy++) for (let xx = creekX(yy) + 2; xx <= XR; xx++) terr[I(xx, yy)] = TREE;
+  const fr = mulberry32(mz.seed * 31 + 7);
+  const open = j => { if (base[j] !== WATER) terr[j] = base[j] === SAND && fr() < 0.6 ? SAND : fr() < 0.15 ? FLOWER : G; };
+  for (let yy = y; yy < YT; yy++) open(I(land, yy));
+  for (const j of mz.cut) open(j);
+  const ey = (mz.ex / W) | 0;
+  return { x, y, water, door: I(W - 2, ey), exit: mz.ex, steps: mz.steps };
 })();
 const objBase = new Map();
 (function genObjects() {
@@ -475,7 +606,7 @@ let crowSeq = 0, crows = [], crowT = 40, sprAcc = 0, saveAcc = 0, hudAcc = 0, mi
 const parts = [], floats = [];
 
 function newGame(mode = 'relaxed') {
-  S = { v: 1, mode, runLeft: mode === 'hour' ? RUN_LEN : 0, warned: 0, coins: 60, xp: 0, lvl: 1, time: 0, tools: { can: 0, hoe: 0, boots: 0 }, water: 8,
+  S = { v: 1, mode, runLeft: mode === 'hour' ? RUN_LEN : 0, warned: 0, coins: 60, xp: 0, lvl: 1, time: 0, tools: { can: 0, hoe: 0, boots: 0, rod: 0 }, water: 8,
     seeds: { turnip: 6 }, produce: {}, items: { fert: 0, scarecrow: 0, sprinkler: 0, sprinkler2: 0 },
     owned: [0], cleared: [], hp: {}, sel: 'hand', seedSel: 'turnip', goal: 0,
     st: { harv: 0, ship: 0, till: 0, plant: 0, earned: 0, sprink: 0, crop: {} }, seenCrow: 0 };
@@ -513,7 +644,7 @@ function load(raw) {
     newGame(d.mode || 'relaxed');
     const base = S;
     S = Object.assign(base, d);
-    S.tools = Object.assign({ can: 0, hoe: 0, boots: 0 }, d.tools);
+    S.tools = Object.assign({ can: 0, hoe: 0, boots: 0, rod: 0 }, d.tools);
     S.items = Object.assign({ fert: 0, scarecrow: 0, sprinkler: 0, sprinkler2: 0 }, d.items);
     S.st = Object.assign({ harv: 0, ship: 0, till: 0, plant: 0, earned: 0, sprink: 0, crop: {} }, d.st);
     soil = new Map(d.soil || []);
@@ -531,7 +662,7 @@ function load(raw) {
 }
 
 /* ---------------- Rules ---------------- */
-const owns = p => ownedSet.has(p);
+const owns = p => p === SECRET_PLOT || ownedSet.has(p);
 const capWater = () => UPG.can.tiers[S.tools.can].cap;
 const speed = () => UPG.boots.tiers[S.tools.boots].speed * T;
 function stageOf(cr) { const c = CROP[cr.id]; return cr.p >= c.grow ? 4 : Math.min(3, Math.floor(cr.p / c.grow * 4)); }
@@ -539,6 +670,7 @@ const ripe = cr => cr && cr.p >= CROP[cr.id].grow;
 function walkable(x, y) {
   if (x < 0 || y < 0 || x >= W || y >= H) return false;
   const i = I(x, y), t = terr[i];
+  if (SECRET && S && S.bridge && (SECRET.water.has(i) ? !pathing : i === SECRET.door)) return true;
   if (t === WATER || t === TREE || t === BLOCK) return false;
   const p = plotMap[i]; if (p >= 0 && !owns(p)) return false;
   const o = objs.get(i); if (o && o.t !== 'weed') return false;
@@ -595,8 +727,10 @@ function actLocal(a) {
   face(x, y);
   actAnim = 0.22; actTool = a.tool || 'hand';
   if (a.k === 'sell') return shipAll();
+  if (a.k === 'fish') { actTool = 'rod'; return startFishing(x, y); }
   if (a.k === 'refill') { S.water = capWater(); floatText(x, y, 'Can full', '#9fd6f5'); drops(x, y, 8); actTool = 'can'; return; }
   if (a.k === 'walk') return;
+  if (i === CHERRY) return pickCherry(x, y);
   const s = soil.get(i);
   if (s && s.c && ripe(s.c)) return harvest(i, x, y);
   const p = plotMap[i];
@@ -615,6 +749,7 @@ function actLocal(a) {
       if (!(S.items.fert > 0)) { toast('You are out of fertilizer. Buy more in the shop.', 'warn', 'nofert'); break; }
       S.items.fert--; s.f = 1; dirt(x, y, '#e9e2cf', 6);
       break;
+    case 'rod': if (a.first) toast('Cast your line into the lake or the river.', 'info', 'rodwhere'); break;
     default: place(a.tool, x, y);
   }
 }
@@ -702,13 +837,22 @@ function harvest(i, x, y) {
   s.w = 0;
   crows.forEach(cr => { if (cr.i === i && cr.state !== 'leave') cr.state = 'leave'; });
 }
-function shipAll() {
-  let total = 0, count = 0;
-  for (const id in S.produce) { total += S.produce[id] * CROP[id].sell; count += S.produce[id]; }
-  if (!count) { toast('Nothing to ship yet. Harvest ripe crops first.', 'info', 'noship'); return; }
+// "3 crops", "1 fish", "2 Crystal Cherries", joined as "3 crops, 2 fish and 1 Crystal Cherry"
+function basketWords(counts) {
+  const parts = [];
+  if (counts.crop) parts.push(`${counts.crop} crop${counts.crop > 1 ? 's' : ''}`);
+  if (counts.fish) parts.push(`${counts.fish} fish`);
+  if (counts.cherry) parts.push(`${counts.cherry} Crystal Cherr${counts.cherry > 1 ? 'ies' : 'y'}`);
+  return parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0] || '';
+}
+const kindOf = id => FISHBY[id] ? 'fish' : id === 'cherry' ? 'cherry' : 'crop';
+function shipAll(verb = 'Shipped') {
+  let total = 0, count = 0; const counts = {};
+  for (const id in S.produce) { const q = S.produce[id]; total += q * CROP[id].sell; count += q; counts[kindOf(id)] = (counts[kindOf(id)] || 0) + q; }
+  if (!count) { toast(verb === 'Shipped' ? 'Nothing to ship yet. Harvest ripe crops or catch some fish first.' : 'Nothing to sell yet.', 'info', 'noship'); return; }
   S.coins += total; S.st.earned += total; S.st.ship++; S.produce = {};
-  floatText(BIN % W, (BIN / W) | 0, '+' + fmt(total), '#f2c14e');
-  toast(`Shipped ${count} crop${count > 1 ? 's' : ''} for ${fmt(total)}.`, 'good');
+  if (verb === 'Shipped') floatText(BIN % W, (BIN / W) | 0, '+' + fmt(total), '#f2c14e');
+  toast(`${verb} ${basketWords(counts)} for ${fmt(total)}.`, 'good');
 }
 function sellOne(id) {
   const q = S.produce[id] || 0; if (!q) return;
@@ -717,7 +861,12 @@ function sellOne(id) {
 }
 
 /* ---------------- Movement and pathing ---------------- */
+let pathing = false;
 function findPath(sx, sy, goal) {
+  pathing = true;
+  try { return findPathInner(sx, sy, goal); } finally { pathing = false; }
+}
+function findPathInner(sx, sy, goal) {
   const prev = new Int16Array(W * H).fill(-1);
   const start = I(sx, sy); prev[start] = start;
   const q = [start]; let h = 0;
@@ -735,7 +884,7 @@ function findPath(sx, sy, goal) {
   return null;
 }
 const ptile = () => [Math.floor(player.x / T), Math.floor(player.y / T)];
-function inReach(a) { const [px, py] = ptile(); return a.k === 'walk' ? (px === a.x && py === a.y) || (cheb(px, py, a.x, a.y) <= 1 && !walkable(a.x, a.y)) : cheb(px, py, a.x, a.y) <= 1; }
+function inReach(a) { const [px, py] = ptile(); return a.k === 'walk' ? (px === a.x && py === a.y) || (cheb(px, py, a.x, a.y) <= 1 && !walkable(a.x, a.y)) : cheb(px, py, a.x, a.y) <= (a.k === 'fish' ? 3 : 1); }
 function freeAt(x, y) {
   const r = 8;
   return walkable(Math.floor((x - r) / T), Math.floor((y - r) / T)) && walkable(Math.floor((x + r) / T), Math.floor((y - r) / T)) &&
@@ -746,7 +895,7 @@ function update(dt) {
   if (paused) return;
   if (S.mode === 'hour') {
     S.runLeft -= dt;
-    if (S.runLeft <= 300 && S.warned < 1) { S.warned = 1; toast('5 minutes left. Only cash counts, so ship your crops.', 'warn'); }
+    if (S.runLeft <= 300 && S.warned < 1) { S.warned = 1; toast('5 minutes left. Only cash counts, so ship your crops and fish.', 'warn'); }
     if (S.runLeft <= 60 && S.warned < 2) { S.warned = 2; toast('1 minute left. Ship everything now.', 'warn'); }
     if (S.runLeft <= 0) { S.runLeft = 0; endRun(); return; }
   }
@@ -762,8 +911,10 @@ function update(dt) {
     queue.length = 0; path = []; cam.free = false;
     const l = Math.hypot(mx, my); mx /= l; my /= l;
     const nx = player.x + mx * spd * dt, ny = player.y + my * spd * dt;
-    if (freeAt(nx, player.y)) player.x = nx;
-    if (freeAt(player.x, ny)) player.y = ny;
+    if (mx && freeAt(nx, player.y)) player.x = nx;
+    else if (mx && !my) { const cy = Math.floor(player.y / T) * T + 16; if (freeAt(nx, cy)) player.y += clamp(cy - player.y, -spd * dt, spd * dt); }
+    if (my && freeAt(player.x, ny)) player.y = ny;
+    else if (my && !mx) { const cx = Math.floor(player.x / T) * T + 16; if (freeAt(cx, ny)) player.x += clamp(cx - player.x, -spd * dt, spd * dt); }
     player.dir = Math.abs(mx) > Math.abs(my) ? (mx > 0 ? 'right' : 'left') : (my > 0 ? 'down' : 'up');
     player.moving = true;
   } else if (queue.length) {
@@ -775,7 +926,7 @@ function update(dt) {
       const [px, py] = ptile();
       const goal = a.k === 'walk'
         ? (walkable(a.x, a.y) ? (x, y) => x === a.x && y === a.y : (x, y) => cheb(x, y, a.x, a.y) <= 1)
-        : (x, y) => cheb(x, y, a.x, a.y) <= 1;
+        : (x, y) => cheb(x, y, a.x, a.y) <= (a.k === 'fish' ? 3 : 1);
       const p = findPath(px, py, goal);
       if (!p || ++stuck > 3) { queue.shift(); stuck = 0; if (a.first) toast("Can't reach that spot from here.", 'info', 'reach'); }
       else path = p;
@@ -790,6 +941,8 @@ function update(dt) {
     player.moving = true;
   }
   if (player.moving) player.anim += dt;
+  updateFishing(dt);
+  checkDoors();
   actCd -= dt; actAnim = Math.max(0, actAnim - dt);
 
   grow(dt);
@@ -805,7 +958,8 @@ function update(dt) {
   else if (!cam.free) { tx = player.x - vw / 2; ty = player.y - vh / 2; }
   if (tx != null) {
     tx = vw >= W * T ? (W * T - vw) / 2 : clamp(tx, 0, W * T - vw);
-    ty = vh >= H * T ? (H * T - vh) / 2 : clamp(ty, 0, H * T - vh);
+    const Y0 = inGarden() ? HV * T : 0, Y1 = inGarden() ? H * T : HV * T;
+    ty = vh >= Y1 - Y0 ? Y0 + (Y1 - Y0 - vh) / 2 : clamp(ty, Y0, Y1 - vh);
     const k = Math.min(1, dt * 7);
     cam.x += (tx - cam.x) * k; cam.y += (ty - cam.y) * k;
   }
@@ -930,6 +1084,152 @@ const bg = document.createElement('canvas'); bg.width = W * T; bg.height = H * T
   }
 })();
 
+let secretBuf = '', secretAt = 0, secretSnap = null;
+function secretKey(k) {
+  if (k.length !== 1 || k < 'a' || k > 'z') { secretBuf = ''; return false; }
+  const now = performance.now();
+  if (now - secretAt > 3000) secretBuf = '';
+  secretAt = now;
+  if (k === 'b') secretSnap = { shop: shopEl.hidden, seed: S.seedSel, sel: S.sel };
+  secretBuf = (secretBuf + k).slice(-6);
+  if (secretBuf !== 'bridge' || !SECRET) return false;
+  secretBuf = '';
+  const [px, py] = ptile();
+  if (px !== SECRET.x || py !== SECRET.y) return false;
+  if (secretSnap) { if (secretSnap.shop && !shopEl.hidden) closeShop(); S.seedSel = secretSnap.seed; selectTool(secretSnap.sel); }
+  S.bridge = 1; save();
+  return true;
+}
+const inGarden = () => player.y >= HV * T;
+function warpTo(i) {
+  player.x = (i % W) * T + 16; player.y = ((i / W) | 0) * T + 16;
+  queue = []; path = []; placeCam();
+}
+function checkDoors() {
+  if (!SECRET || !S || !S.bridge) return;
+  const i = I(Math.floor(player.x / T), Math.floor(player.y / T));
+  if (i === SECRET.door) {
+    for (const j of GARDEN_SOIL) if (!soil.has(j)) { soil.set(j, { t: 1, w: 0, c: null, f: 0, it: null }); if (NET.role) netOp(j, encTile(j)); }
+    if (soil.has(CHERRY)) { soil.delete(CHERRY); if (NET.role) netOp(CHERRY, encTile(CHERRY)); }
+    warpTo(G_ENTRY); player.dir = 'right';
+  } else if (i === DOOR_W) { warpTo(SECRET.exit); player.dir = 'left'; }
+}
+const cherryReady = () => !S.cherryAt || S.time >= S.cherryAt;
+function pickCherry(x, y) {
+  if (!cherryReady()) { floatText(x, y, `Regrowing: ${Math.ceil(S.cherryAt - S.time)}s`, '#ffc6e2'); return; }
+  S.produce.cherry = (S.produce.cherry || 0) + 1;
+  S.st.crop.cherry = (S.st.crop.cherry || 0) + 1;
+  S.cherryAt = S.time + CHERRY_REGROW;
+  gainXp(CROP.cherry.xp);
+  floatText(x, y, '+1 Crystal Cherry', '#ffc6e2'); dirt(x, y, '#ff9ad5', 12); save();
+}
+function drawCherryTree(c, t) {
+  ell(c, 16, 30, 15, 5, 'rgba(0,0,0,.22)');
+  rect(c, 13, 10, 6, 21, '#6b4226'); rect(c, 15, 12, 2, 18, '#7d5233');
+  line(c, 16, 14, 7, 4, '#6b4226', 3); line(c, 16, 12, 26, 2, '#6b4226', 3);
+  const P = ['#f7b6d2', '#f39cc3', '#fcd5e5', '#ef8fb9'];
+  [[16, -8, 15, 0], [4, 0, 10, 1], [28, -1, 10, 1], [9, -14, 9, 2], [24, -15, 9, 2], [16, -20, 8, 3], [16, 2, 9, 2]].forEach(([x, y, r, k]) => circ(c, x, y, r, P[k]));
+  for (let k = 0; k < 9; k++) { const ph = (t * 0.35 + k * 0.37) % 1; rect(c, -6 + k * 5 + Math.sin(t + k) * 3, -14 + ph * 44, 2, 2, `rgba(252,213,229,${1 - ph})`); }
+  if (cherryReady()) {
+    line(c, 23, 2, 23, 8, '#5e7a2a', 1.2);
+    circ(c, 23, 11, 4.2, 'rgba(255,120,190,.9)'); circ(c, 23, 11, 3, 'rgba(255,200,230,.95)'); circ(c, 21.8, 9.8, 1.2, '#fff');
+    const g = (Math.sin(t * 3) + 1) / 2; c.fillStyle = `rgba(190,245,255,${0.35 + g * 0.5})`; c.beginPath(); c.arc(23, 11, 6 + g * 2, 0, Math.PI * 2); c.fill();
+    circ(c, 23, 11, 3, 'rgba(255,170,215,.95)');
+  }
+}
+function drawSign(c) {
+  ell(c, 16, 30, 7, 2.5, 'rgba(0,0,0,.2)');
+  rect(c, 14.5, 12, 3, 18, '#6e4a2a');
+  c.fillStyle = '#b58350'; c.beginPath(); c.moveTo(3, 9); c.lineTo(9, 3); c.lineTo(29, 3); c.lineTo(29, 15); c.lineTo(9, 15); c.closePath(); c.fill();
+  c.strokeStyle = '#6e4a2a'; c.lineWidth = 1.2; c.stroke();
+  c.fillStyle = '#2a1f08'; c.font = '700 8px "Pixelify Sans", monospace'; c.textAlign = 'center'; c.fillText('EXIT', 19, 12);
+}
+/* ---- Fishing ---- */
+let fishing = null;           // { x, y, where, wait, t, bite }
+const isLake = x => x < 40;
+function startFishing(x, y) {
+  if (!(S.tools.rod > 0)) { toast('You need a fishing rod. Buy one in the Tools tab of the shop.', 'info', 'norod'); return; }
+  face(x, y); actAnim = 0.22;
+  fishing = { x, y, where: isLake(x) ? 'lake' : 'river', wait: 2 + Math.random() * 4.5, t: 0, px: player.x, py: player.y };
+  floatText(x, y, 'Cast!', '#cfe8ff');
+}
+function cancelFishing(msg) { if (!fishing) return; fishing = null; if (msg) toast(msg, 'info', 'fishcancel'); }
+function rollFish(where) {
+  const tier = Math.max(1, S.tools.rod), list = FISH[where];
+  const ws = list.map(f => f.w * (f.rare || f.w < 12 ? 1 + 0.6 * (tier - 1) : 1));
+  let r = Math.random() * ws.reduce((a, b) => a + b, 0);
+  for (let k = 0; k < list.length; k++) { r -= ws[k]; if (r <= 0) return list[k]; }
+  return list[0];
+}
+function updateFishing(dt) {
+  if (!fishing || fishing.bite) return;
+  if (Math.hypot(player.x - fishing.px, player.y - fishing.py) > 6 || S.sel !== 'rod') { cancelFishing(); return; }
+  fishing.t += dt;
+  if (fishing.t >= fishing.wait) { fishing.bite = true; openFishGame(rollFish(fishing.where)); }
+}
+const fishEl = $('#fishGame'), fishGrid = $('#fishGrid'), fishBar = $('#fishTime');
+let fg = null;
+function openFishGame(f) {
+  const tier = Math.max(1, S.tools.rod);
+  const limit = f.time + 0.6 * (tier - 1);
+  const cells = Array.from({ length: 16 }, (_, k) => k).sort(() => Math.random() - 0.5).slice(0, f.n);
+  fg = { f, limit, left: limit, hot: new Set(cells), last: performance.now(), over: false };
+  fishGrid.innerHTML = '';
+  for (let k = 0; k < 16; k++) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.setAttribute('aria-label', fg.hot.has(k) ? 'Glowing spot' : 'Water');
+    if (fg.hot.has(k)) b.className = 'hot';
+    b.addEventListener('pointerdown', e => { e.preventDefault(); fishTap(k, b); });
+    b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fishTap(k, b); } });
+    fishGrid.appendChild(b);
+  }
+  $('#fishTitle').textContent = f.rare ? 'Something big is on the line!' : 'Fish on!';
+  $('#fishNote').textContent = `Tap all ${f.n} glowing spots before the line snaps.`;
+  fishBar.style.width = '100%'; fishBar.classList.remove('low');
+  keys.clear(); queue = []; path = [];
+  fishEl.hidden = false;
+  requestAnimationFrame(fishTick);
+}
+function fishTap(k, b) {
+  if (!fg || fg.over) return;
+  if (fg.hot.has(k)) { fg.hot.delete(k); b.className = 'done'; if (!fg.hot.size) endFishGame(true); }
+  else if (!b.classList.contains('done')) { fg.left -= 0.4; b.className = 'miss'; setTimeout(() => { if (b.className === 'miss') b.className = ''; }, 250); }
+}
+function fishTick(now) {
+  if (!fg || fg.over) return;
+  fg.left -= (now - fg.last) / 1000; fg.last = now;
+  const pct = Math.max(0, fg.left / fg.limit);
+  fishBar.style.width = (pct * 100) + '%'; fishBar.classList.toggle('low', pct < 0.3);
+  if (fg.left <= 0) { endFishGame(false); return; }
+  requestAnimationFrame(fishTick);
+}
+function endFishGame(won) {
+  if (!fg || fg.over) return;
+  fg.over = true;
+  const f = fg.f, spot = fishing;
+  setTimeout(() => {
+    fishEl.hidden = true; fg = null; fishing = null;
+    if (won) {
+      S.produce[f.id] = (S.produce[f.id] || 0) + 1;
+      S.st.fish = (S.st.fish || 0) + 1; S.st.crop[f.id] = (S.st.crop[f.id] || 0) + 1;
+      gainXp(f.xp);
+      if (spot) { floatText(spot.x, spot.y, '+1 ' + f.name, '#cfe8ff'); drops(spot.x, spot.y, 10); }
+      toast(`You caught a ${f.name}! It sells for ${fmt(f.sell)}.`, 'good');
+      updateHUD(true);
+    } else toast(f.rare ? `Something huge got away...` : `The ${f.name} got away.`, 'warn', 'fishlost');
+  }, won ? 250 : 400);
+}
+function drawFishing(c, t) {
+  if (!fishing) return;
+  const bx = fishing.x * T + 16, by = fishing.y * T + 16 + (fishing.bite ? Math.sin(t * 30) * 2 : Math.sin(t * 3) * 1.5);
+  const dx = player.dir === 'left' ? -1 : player.dir === 'right' ? 1 : 0;
+  const tipX = player.x + dx * 18 + (dx ? 0 : 12), tipY = player.y - 22;
+  c.strokeStyle = 'rgba(244,238,221,.8)'; c.lineWidth = 1; c.beginPath(); c.moveTo(tipX, tipY); c.quadraticCurveTo((tipX + bx) / 2, Math.max(tipY, by) + 10, bx, by); c.stroke();
+  line(c, player.x + dx * 6, player.y - 4, tipX, tipY, '#9a7a45', 2);
+  ell(c, bx, by + 3, 6, 2, 'rgba(169,210,236,.6)');
+  circ(c, bx, by, 3.4, '#ffffff'); c.fillStyle = '#e2443a'; c.beginPath(); c.arc(bx, by, 3.4, Math.PI, 0); c.fill();
+  if (fishing.bite) { c.fillStyle = '#f2c14e'; c.font = '700 16px "Pixelify Sans", monospace'; c.textAlign = 'center'; c.fillText('!', player.x, player.y - 32); }
+}
 function drawTree(c, i) {
   const h = hash(i * 31);
   ell(c, 16, 29, 11, 4, 'rgba(0,0,0,.2)');
@@ -962,8 +1262,22 @@ function drawObj(c, o) {
     for (let k = 0; k < 7; k++) { const x = 6 + k * 3.3; c.fillStyle = g[k % 3]; c.beginPath(); c.moveTo(x - 2.5, 26); c.lineTo(x + (k % 2 ? 3 : -2), 10 + (k % 3) * 4); c.lineTo(x + 2.5, 26); c.closePath(); c.fill(); }
   }
 }
-function star(c, x, y, r, col) { c.fillStyle = col; c.beginPath(); for (let k = 0; k < 10; k++) { const a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? r * .45 : r; c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); } c.closePath(); c.fill(); }
+function star5(c, x, y, r, col) { c.fillStyle = col; c.beginPath(); for (let k = 0; k < 10; k++) { const a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? r * .45 : r; c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); } c.closePath(); c.fill(); }
+function drawFish(c, f) {
+  c.save(); c.translate(16, 18);
+  c.fillStyle = f.col; c.beginPath(); c.moveTo(9, 0); c.lineTo(15, -6); c.lineTo(15, 6); c.closePath(); c.fill();
+  ell(c, -1, 0, 11, 6.5, f.col);
+  c.fillStyle = f.belly; c.beginPath(); c.ellipse(-1, 2.2, 9.5, 3.4, 0, 0, Math.PI); c.fill();
+  if (f.stripes) for (let k = -6; k <= 4; k += 4) rect(c, k, -5, 1.6, 6, f.stripes);
+  if (f.spots) [[-6, -2], [-2, -3.5], [2, -1.5], [5, -3.4], [-4, 1]].forEach(([x, y]) => circ(c, x, y, 1, f.spots));
+  c.fillStyle = f.col; c.beginPath(); c.moveTo(-3, -6); c.lineTo(3, -9); c.lineTo(5, -5); c.closePath(); c.fill();
+  circ(c, -8, -1.5, 1.6, '#fff'); circ(c, -8.3, -1.5, .8, '#1d1d24');
+  if (f.whiskers) { line(c, -11, 1, -15, 3, '#2a2a33', .8); line(c, -11, 2, -14, 5, '#2a2a33', .8); }
+  if (f.rare) { c.fillStyle = 'rgba(255,255,255,.35)'; c.beginPath(); c.ellipse(-3, -3, 5, 1.4, -0.2, 0, Math.PI * 2); c.fill(); }
+  c.restore();
+}
 function species(c, id, isRipe) {
+  if (FISHBY[id]) return drawFish(c, FISHBY[id]);
   const L = '#5fb24a', L2 = '#4a9a3a', D = '#3a7d31';
   switch (id) {
     case 'turnip':
@@ -1056,8 +1370,8 @@ function species(c, id, isRipe) {
       break;
     case 'starfruit':
       leaf(c, 9, 14, 6, 3, -0.5, L2); leaf(c, 23, 14, 6, 3, 0.5, L2); leaf(c, 16, 10, 3.5, 6, 0, L);
-      if (isRipe) { star(c, 16, 22, 8.5, '#f7d23e'); star(c, 16, 22, 4, '#fbe98a'); }
-      else star(c, 16, 22, 4, '#a6d36a');
+      if (isRipe) { star5(c, 16, 22, 8.5, '#f7d23e'); star5(c, 16, 22, 4, '#fbe98a'); }
+      else star5(c, 16, 22, 4, '#a6d36a');
       break;
     case 'dragonfruit':
       leaf(c, 11, 12, 3, 10, -0.35, '#4f9a4a'); leaf(c, 21, 12, 3, 10, 0.35, '#4f9a4a'); rect(c, 15, 4, 2, 22, '#3f8a3c');
@@ -1066,6 +1380,16 @@ function species(c, id, isRipe) {
         [[-5, -3, -0.8], [5, -3, 0.8], [-5, 4, -2.2], [5, 4, 2.2], [0, -7, 0]].forEach(([dx, dy, r]) => leaf(c, 16 + dx, 22 + dy, 1.4, 3, r, '#9ad34a'));
         rect(c, 13.5, 19, 2, 2, '#f59ac4');
       } else ell(c, 16, 22, 3, 3.5, '#9ad34a');
+      break;
+    case 'cherry':
+      c.strokeStyle = '#5e7a2a'; c.lineWidth = 1.6;
+      c.beginPath(); c.moveTo(16, 8); c.quadraticCurveTo(13, 14, 10, 20); c.stroke();
+      c.beginPath(); c.moveTo(16, 8); c.quadraticCurveTo(19, 15, 22, 21); c.stroke();
+      leaf(c, 19, 7, 4, 2, -0.5, '#6cc04f');
+      for (const [cx, cy] of [[10, 23], [22, 24]]) {
+        circ(c, cx, cy, 5.5, 'rgba(255,120,190,.85)'); circ(c, cx, cy, 4, 'rgba(255,190,225,.9)');
+        circ(c, cx - 1.8, cy - 2, 1.6, '#ffffff'); rect(c, cx + 1, cy + 1, 1.5, 1.5, 'rgba(160,240,255,.95)');
+      }
       break;
     case 'rose':
       rect(c, 15.2, 6, 1.6, 22, '#3f7a3a'); leaf(c, 11, 20, 4.5, 2, -0.5, L2); leaf(c, 21, 15, 4.5, 2, 0.5, L);
@@ -1216,6 +1540,13 @@ function iconArt(c, key, t) {
       const id = S ? S.seedSel : 'turnip';
       c.save(); c.translate(16, 17); c.scale(.42, .42); c.translate(-16, TALL.has(id) ? -6 : -18); species(c, id, true); c.restore();
       break; }
+    case 'rod': {
+      const tier = S ? S.tools.rod : 1, rc = ['#9a7a45', '#c8a24f', '#5b8fb9', '#e8c04a'][tier] || '#c8a24f';
+      line(c, 6, 28, 26, 4, rc, 2.6); line(c, 6, 28, 10, 23, '#3a2a18', 3.2);
+      circ(c, 11, 22, 3.2, '#9aa0a8'); circ(c, 11, 22, 1.4, '#55595f');
+      c.strokeStyle = 'rgba(244,238,221,.85)'; c.lineWidth = 1; c.beginPath(); c.moveTo(26, 4); c.quadraticCurveTo(29, 12, 26, 20); c.stroke();
+      circ(c, 26, 21, 2.2, '#e2443a'); rect(c, 24, 21, 4, 1.5, '#fff');
+      break; }
     case 'boots': {
       const bc = ['#6b4a2e', '#8a5a2e', '#3b6fb0'][S ? S.tools.boots : 0];
       rect(c, 8, 6, 9, 16, bc); c.fillStyle = bc; c.beginPath(); c.moveTo(8, 20); c.lineTo(27, 22); c.lineTo(27, 27); c.lineTo(8, 27); c.closePath(); c.fill();
@@ -1253,6 +1584,7 @@ function draw(t) {
   const x0 = clamp(Math.floor(cam.x / T) - 1, 0, W - 1), x1 = clamp(Math.ceil((cam.x + vw) / T) + 1, 0, W - 1);
   const y0 = clamp(Math.floor(cam.y / T) - 1, 0, H - 1), y1 = clamp(Math.ceil((cam.y + vh) / T) + 1, 0, H - 1);
   const sx = x0 * T, sy = y0 * T, sw = (x1 - x0 + 1) * T, sh = (y1 - y0 + 1) * T;
+  ctx.save(); ctx.beginPath(); if (inGarden()) ctx.rect(0, HV * T, W * T, (H - HV) * T); else ctx.rect(0, 0, W * T, HV * T); ctx.clip();
   ctx.drawImage(bg, sx, sy, sw, sh, sx, sy, sw, sh);
 
   // animated water glints
@@ -1290,7 +1622,8 @@ function draw(t) {
     for (let x = x0; x <= x1; x++) {
       const i = I(x, y), tt = terr[i];
       ctx.save(); ctx.translate(x * T, y * T);
-      if (tt === TREE) drawTree(ctx, i);
+      if (i === CHERRY) drawCherryTree(ctx, t); else if (tt === TREE) drawTree(ctx, i);
+      if (i === SIGN) drawSign(ctx);
       const o = objs.get(i); if (o) drawObj(ctx, o);
       const s = soil.get(i);
       if (s) { if (s.c) drawCrop(ctx, s.c, i, t); if (s.it) drawItem(ctx, s.it, t + hash(i) * 3); }
@@ -1324,6 +1657,7 @@ function draw(t) {
     ctx.strokeRect(hover.x * T + 1, hover.y * T + 1, T - 2, T - 2);
   }
   for (const cr of crows) drawCrow(ctx, cr);
+  drawFishing(ctx, t);
   if (NET.role) {
     ctx.textAlign = 'center'; ctx.font = '600 11px "Pixelify Sans", monospace'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(20,24,36,.85)';
     const tag = (x, y, n, col) => { ctx.strokeText(n, x, y); ctx.fillStyle = col; ctx.fillText(n, x, y); };
@@ -1335,6 +1669,7 @@ function draw(t) {
   ctx.textAlign = 'center'; ctx.font = '700 13px "Pixelify Sans", monospace'; ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(20,24,36,.85)';
   for (const f of floats) { const yy = f.y - f.t * 26; ctx.globalAlpha = clamp(1.4 - f.t, 0, 1); ctx.strokeText(f.text, f.x, yy); ctx.fillStyle = f.col; ctx.fillText(f.text, f.x, yy); }
   ctx.globalAlpha = 1;
+  ctx.restore();
   // evening light
   const hr = hourOf();
   let dark = 0;
@@ -1346,6 +1681,7 @@ function hourOf() { return (7 + (S.time % DAY) / DAY * 24) % 24; }
 function valid(tool, x, y) {
   if (x < 0 || y < 0 || x >= W || y >= H) return false;
   const i = I(x, y), p = plotMap[i], s = soil.get(i);
+  if (i === CHERRY) return cherryReady();
   if (i === BIN || i === WELL || terr[i] === WATER) return true;
   if (p >= 0 && !owns(p)) return true;
   if (s && s.c && ripe(s.c)) return true;
@@ -1357,41 +1693,43 @@ function valid(tool, x, y) {
     case 'seed': return !!(s && s.t && !s.c && !s.it) && (S.seeds[S.seedSel] || 0) > 0;
     case 'fert': return !!(s && s.t && !s.f) && S.items.fert > 0;
     case 'hand': return !!(s && (s.it || s.c));
+    case 'rod': return false;
     default: return !o && !(s && (s.c || s.it)) && (S.items[tool] || 0) > 0;
   }
 }
 
 /* ---------------- Minimap ---------------- */
 const mini = $('#mini'), mctx = mini.getContext('2d');
-const mbase = document.createElement('canvas'); mbase.width = W; mbase.height = H;
+const mbase = document.createElement('canvas'); mbase.width = W; mbase.height = HV;
 (function () {
-  const m = mbase.getContext('2d'), img = m.createImageData(W, H);
+  const m = mbase.getContext('2d'), img = m.createImageData(W, HV);
   const col = { [G]: [92, 154, 62], [FLOWER]: [92, 154, 62], [WATER]: [59, 120, 171], [PATH]: [183, 143, 94], [TREE]: [38, 85, 58], [BLOCK]: [184, 71, 58], [SAND]: [214, 192, 139] };
-  for (let i = 0; i < W * H; i++) { let c = col[terr[i]]; if (plotMap[i] >= 0) c = [106, 163, 70]; img.data.set([c[0], c[1], c[2], 255], i * 4); }
+  for (let i = 0; i < W * HV; i++) { let c = col[terr[i]]; if (plotMap[i] >= 0) c = [106, 163, 70]; img.data.set([c[0], c[1], c[2], 255], i * 4); }
   m.putImageData(img, 0, 0);
 })();
 function drawMini() {
-  const sx = mini.width / W, sy = mini.height / H;
+  const sx = mini.width / W, sy = mini.height / HV;
   mctx.imageSmoothingEnabled = false;
   mctx.drawImage(mbase, 0, 0, mini.width, mini.height);
   for (const p of PLOTS) if (!owns(p.id)) { mctx.fillStyle = 'rgba(10,16,30,.5)'; mctx.fillRect(p.x * sx, p.y * sy, p.w * sx, p.h * sy); }
   for (const [i, s] of soil) {
+    if (i >= W * HV) continue;
     const x = (i % W) * sx, y = ((i / W) | 0) * sy;
     mctx.fillStyle = s.it ? '#c8ced8' : s.c ? (ripe(s.c) ? '#f2c14e' : '#3f9a3a') : '#7d5435';
     mctx.fillRect(x, y, Math.ceil(sx), Math.ceil(sy));
   }
-  for (const c of crows) if (c.state === 'land') { mctx.fillStyle = '#d0503f'; mctx.fillRect(c.tx / T * sx - 2, c.ty / T * sy - 2, 4, 4); }
+  for (const c of crows) if (c.state === 'land' && c.ty < HV * T) { mctx.fillStyle = '#d0503f'; mctx.fillRect(c.tx / T * sx - 2, c.ty / T * sy - 2, 4, 4); }
   const vw = innerWidth / zoom, vh = innerHeight / zoom;
   mctx.strokeStyle = '#f2c14e'; mctx.lineWidth = 1.5; mctx.strokeRect(cam.x / T * sx, cam.y / T * sy, vw / T * sx, vh / T * sy);
   mctx.fillStyle = '#f4eedd'; mctx.strokeStyle = '#22314c'; mctx.lineWidth = 1.5;
-  for (const o of NET.others.values()) if (o.p) { mctx.fillStyle = FCOL[o.c] || FCOL[1]; mctx.beginPath(); mctx.arc(o.x / T * sx, o.y / T * sy, 3, 0, Math.PI * 2); mctx.fill(); mctx.stroke(); }
+  for (const o of NET.others.values()) if (o.p && o.y < HV * T) { mctx.fillStyle = FCOL[o.c] || FCOL[1]; mctx.beginPath(); mctx.arc(o.x / T * sx, o.y / T * sy, 3, 0, Math.PI * 2); mctx.fill(); mctx.stroke(); }
   mctx.fillStyle = '#f4eedd';
-  mctx.beginPath(); mctx.arc(player.x / T * sx, player.y / T * sy, 3.2, 0, Math.PI * 2); mctx.fill(); mctx.stroke();
+  if (!inGarden()) { mctx.beginPath(); mctx.arc(player.x / T * sx, player.y / T * sy, 3.2, 0, Math.PI * 2); mctx.fill(); mctx.stroke(); }
 }
 mini.addEventListener('pointerdown', e => {
   e.preventDefault();
   const r = mini.getBoundingClientRect();
-  const x = clamp(Math.floor((e.clientX - r.left) / r.width * W), 0, W - 1), y = clamp(Math.floor((e.clientY - r.top) / r.height * H), 0, H - 1);
+  const x = clamp(Math.floor((e.clientX - r.left) / r.width * W), 0, W - 1), y = clamp(Math.floor((e.clientY - r.top) / r.height * HV), 0, HV - 1);
   const p = plotMap[I(x, y)];
   if (p >= 0 && !owns(p)) { lookAt(x * T + 16, y * T + 16); openShop('land', p); return; }
   cam.free = false; queue = [{ k: 'walk', x, y, first: true }]; path = [];
@@ -1409,10 +1747,11 @@ function handleTap(tp, first) {
     if (crow) { if (NET.role === 'guest' && crow.id != null) netShoo(crow.id); crow.state = 'leave'; floatText(crow.x / T - .5, crow.y / T - .5, 'Shoo!', '#f4eedd'); return; }
     queue = []; path = []; cam.free = false; stuck = 0;
     if (i === BIN) { queue.push({ k: 'sell', x, y, first }); return; }
+    if (terr[i] === WATER && S.sel === 'rod') { queue.push({ k: 'fish', x, y, first }); return; }
     if (i === WELL || terr[i] === WATER) { queue.push({ k: 'refill', x, y, first }); return; }
     const p = plotMap[i];
     if (p >= 0 && !owns(p)) { openShop('land', p); return; }
-    if (terr[i] === BLOCK) { toast('The farmhouse. Ship crops at the crate out front and fill your can at the well.', 'info', 'house'); return; }
+    if (terr[i] === BLOCK) { toast('The farmhouse. Ship crops and fish at the crate out front, and fill your can at the well.', 'info', 'house'); return; }
     if (plotMap[i] < 0 && walkable(x, y)) { queue.push({ k: 'walk', x, y, first }); return; }
   } else {
     if (plotMap[i] < 0 || !owns(plotMap[i])) return;
@@ -1436,7 +1775,7 @@ cv.addEventListener('pointermove', e => {
   if (panning) {
     const vw = innerWidth / zoom, vh = innerHeight / zoom;
     cam.x = clamp(panning.cx - (e.clientX - panning.x) / zoom, 0, Math.max(0, W * T - vw));
-    cam.y = clamp(panning.cy - (e.clientY - panning.y) / zoom, 0, Math.max(0, H * T - vh));
+    cam.y = inGarden() ? clamp(panning.cy - (e.clientY - panning.y) / zoom, HV * T, Math.max(HV * T, H * T - vh)) : clamp(panning.cy - (e.clientY - panning.y) / zoom, 0, Math.max(0, HV * T - vh));
     return;
   }
   if (painting) { const i = I(clamp(tp.x, 0, W - 1), clamp(tp.y, 0, H - 1)); if (i !== lastPaint) { lastPaint = i; handleTap(tp, false); } }
@@ -1450,12 +1789,14 @@ cv.addEventListener('wheel', e => { e.preventDefault(); zoomUser = clamp(zoomUse
 addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const k = e.key.toLowerCase();
+  if (!fishEl.hidden) { if (k === 'escape') endFishGame(false); return; }
   if (!$('#pauseScreen').hidden) { if ((k === 'p' || k === 'escape') && !NET.hostPaused) { e.preventDefault(); closePause(); } return; }
   if (k === 'p' && helpEl.hidden && $('#modeMenu').hidden && $('#results').hidden) { openPause(); return; }
   if (k === 'escape') { if (!$('#modeMenu').hidden || !$('#results').hidden) return; if (!helpEl.hidden) closeHelp(); else if (!shopEl.hidden) closeShop(); else { queue = []; path = []; closeSeedPicker(); } return; }
   if (!helpEl.hidden || !$('#modeMenu').hidden || !$('#results').hidden) return;
+  if (inGame && !paused && !e.repeat && secretKey(k)) return;
   if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(k)) { if (!shopEl.hidden && document.activeElement && shopEl.contains(document.activeElement)) return; keys.add(k); e.preventDefault(); return; }
-  if (k >= '1' && k <= '8') { const tl = visibleTools()[+k - 1]; if (tl) selectTool(tl.k); return; }
+  if (k >= '1' && k <= '9') { const tl = visibleTools()[+k - 1]; if (tl) selectTool(tl.k); return; }
   if (k === 'q' || k === 'e') { cycleSeed(k === 'e' ? 1 : -1); return; }
   if (k === 'b') { shopEl.hidden ? openShop() : closeShop(); return; }
   if (k === ' ' || k === 'enter') {
@@ -1466,6 +1807,7 @@ addEventListener('keydown', e => {
     const i = I(fx, fy);
     queue = []; path = [];
     if (i === BIN) act({ k: 'sell', x: fx, y: fy, first: true });
+    else if (terr[i] === WATER && S.sel === 'rod') act({ k: 'fish', x: fx, y: fy, first: true });
     else if (i === WELL || terr[i] === WATER) act({ k: 'refill', x: fx, y: fy, first: true });
     else if (plotMap[i] >= 0 && !owns(plotMap[i])) openShop('land', plotMap[i]);
     else act({ k: 'tool', tool: S.sel, x: fx, y: fy, first: true });
@@ -1476,7 +1818,7 @@ addEventListener('blur', () => keys.clear());
 
 /* ---------------- HUD ---------------- */
 const toolbar = $('#toolbar'), seedPicker = $('#seedPicker'), shopEl = $('#shop'), shopBody = $('#shopBody'), helpEl = $('#help');
-function visibleTools() { return TOOLS.filter(tl => !ITEMS[tl.k] || S.lvl >= ITEMS[tl.k].lvl || (S.items[tl.k] || 0) > 0); }
+function visibleTools() { return TOOLS.filter(tl => tl.k === 'rod' ? S.tools.rod > 0 : !ITEMS[tl.k] || S.lvl >= ITEMS[tl.k].lvl || (S.items[tl.k] || 0) > 0); }
 function buildToolbar() {
   toolbar.innerHTML = '';
   visibleTools().forEach((tl, n) => {
@@ -1528,6 +1870,7 @@ const HINTS = {
   scarecrow: 'Place to keep crows off a 9×9 area',
   sprinkler: 'Place to water the 8 tiles around it',
   sprinkler2: 'Place to water a 5×5 area',
+  rod: 'Tap the lake or the river to cast. Lake and river fish are different',
 };
 function updateHint() { const h = HINTS[S.sel]; $('#toolHint').textContent = (typeof h === 'function' ? h() : h) + ' · drag to work a row'; }
 let lastCoins = -1, lastLvl = -1;
@@ -1611,10 +1954,10 @@ function renderShop() {
     });
   } else if (shopTab === 'tools') {
     h += '<p class="note">Upgrades are permanent.</p>';
-    for (const k of ['can', 'hoe', 'boots']) {
+    for (const k of ['can', 'hoe', 'boots', 'rod']) {
       const u = UPG[k], tier = S.tools[k], cur = u.tiers[tier], next = u.tiers[tier + 1];
       const lines = [`Now: ${cur.label}. ${cur.desc}`, next ? `Next: ${next.label}. ${next.desc}` : 'Fully upgraded'];
-      const buy = next ? `<button class="btn sm primary" data-act="upg" data-id="${k}" ${S.coins < next.cost ? 'disabled' : ''}>Upgrade ${fmt(next.cost)}</button>` : '';
+      const buy = next ? `<button class="btn sm primary" data-act="upg" data-id="${k}" ${S.coins < next.cost ? 'disabled' : ''}>${tier === 0 ? 'Buy' : 'Upgrade'} ${fmt(next.cost)}</button>` : '';
       h += rowHTML(k, u.name, lines, buy);
     }
   } else if (shopTab === 'items') {
@@ -1639,11 +1982,11 @@ function renderShop() {
     });
   } else {
     let total = 0, any = false;
-    CROPS.forEach(c => {
+    Object.values(CROP).forEach(c => {
       const q = S.produce[c.id] || 0; if (!q) return; any = true; total += q * c.sell;
       h += rowHTML('crop:' + c.id, `${c.name} ×${q}`, [`${fmt(c.sell)} each · ${fmt(q * c.sell)} total`], `<button class="btn sm" data-act="sell" data-id="${c.id}">Sell</button>`);
     });
-    if (!any) h += '<div class="empty">Nothing to sell yet.<br>Harvest ripe crops, then sell here or drop them in the shipping crate by the farmhouse.</div>';
+    if (!any) h += '<div class="empty">Nothing to sell yet.<br>Harvest ripe crops or catch fish, then sell them here or drop them in the shipping crate by the farmhouse.</div>';
     else h = `<div class="sum"><span>Basket value ${fmt(total)}</span><button class="btn primary sm" data-act="sellall">Sell everything</button></div>` + h;
   }
   shopBody.innerHTML = h;
@@ -1673,7 +2016,7 @@ shopBody.addEventListener('click', e => {
   }
   else if (act === 'view') { const p = PLOTS[+id]; lookAt((p.x + p.w / 2) * T, (p.y + p.h / 2) * T); shopPlot = p.id; }
   else if (act === 'sell') sellOne(id);
-  else if (act === 'sellall') shipAll();
+  else if (act === 'sellall') shipAll('Sold');
   renderShop(); updateHUD(true);
 });
 
@@ -1690,6 +2033,7 @@ function setPauseText(hostPause) {
   $('#resumeBtn').hidden = hostPause;
 }
 function openPause() {
+  if (!fishEl.hidden) return;
   if (!inGame || !S || S.ended || NET.hostPaused) return;
   setPauseText(false);
   S.held = NET.role === 'guest' ? 0 : 1; paused = true; keys.clear(); queue = []; path = [];
@@ -1721,7 +2065,8 @@ function peek(k) { try { return JSON.parse(lsGet(k)); } catch (e) { return null;
 function placeCam() {
   const vw = innerWidth / zoom, vh = innerHeight / zoom;
   cam.free = false;
-  cam.x = clamp(player.x - vw / 2, 0, Math.max(0, W * T - vw)); cam.y = clamp(player.y - vh / 2, 0, Math.max(0, H * T - vh));
+  const Y0 = inGarden() ? HV * T : 0, Y1 = inGarden() ? H * T : HV * T;
+  cam.x = clamp(player.x - vw / 2, 0, Math.max(0, W * T - vw)); cam.y = vh >= Y1 - Y0 ? Y0 + (Y1 - Y0 - vh) / 2 : clamp(player.y - vh / 2, Y0, Y1 - vh);
 }
 function freshFarm(mode) { newGame(mode); rebuildObjects(); }
 function enterGame(mode, fresh) {
@@ -1739,6 +2084,7 @@ function enterGame(mode, fresh) {
     : 'Welcome to Hollowcreek. Your first turnips are ready: tap the sparkling ones.', 'good'), 400);
 }
 function openMenu(msg, err) {
+  if (fg) { fg.over = true; fg = null; } fishEl.hidden = true; fishing = null;
   if (inGame) save();
   if (NET.role) leaveLobby();
   inGame = false; paused = true;
@@ -1750,6 +2096,7 @@ function openMenu(msg, err) {
   $('#nickIn').value = lsGet(NICK_KEY) || '';
   $('#joinBox').hidden = true;
   renderScores();
+  if (recRefresh) recRefresh();
   $('#relaxedNew').hidden = !r;
   const live = h && h.runLeft > 0;
   $('#hourMeta').textContent = live ? `Run in progress: ${mmss(h.runLeft)} left · ${fmt(h.coins || 0)}` : 'No run in progress';
@@ -1787,7 +2134,7 @@ function endRun() {
     ['Crops harvested', S.st.harv],
     ['Level reached', S.lvl],
     ['Fields owned', S.owned.length],
-    ['Unsold crops left behind', unsold],
+    ['Unsold crops and fish left behind', unsold],
   ].map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join('');
   updateHUD(true);
   resEl.hidden = false; $('#resAgain').focus();
@@ -1796,22 +2143,9 @@ function endRun() {
 
 /* ---------------- Online: world record + co-op lobbies ---------------- */
 /* ---- Online backend: Claude when hosted there, otherwise Firebase Realtime Database ---- */
-const FB_CFG = window.HOLLOWCREEK_FIREBASE && window.HOLLOWCREEK_FIREBASE.databaseURL ? window.HOLLOWCREEK_FIREBASE : null;
+const REC_URL = /^https:\/\/script\.google(usercontent)?\.com\/.+/.test(String(window.HOLLOWCREEK_RECORDS_URL || '').trim()) ? String(window.HOLLOWCREEK_RECORDS_URL).trim() : '';
 const IN_CLAUDE = !!(window.claude && typeof window.claude.use === 'function');
 const NET_RATE = 0.1;
-let fbP = null;
-function loadFirebase() {
-  if (fbP) return fbP;
-  fbP = new Promise(res => {
-    if (!FB_CFG) return res(null);
-    const load = src => new Promise((ok, no) => { const el = document.createElement('script'); el.src = src; el.onload = ok; el.onerror = no; document.head.appendChild(el); });
-    load('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js')
-      .then(() => load('https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js'))
-      .then(() => { const app = firebase.apps.length ? firebase.app() : firebase.initializeApp(FB_CFG); res(firebase.database(app)); })
-      .catch(() => res(null));
-  });
-  return fbP;
-}
 function playerId() {
   let id = lsGet('hollowcreek-player-id');
   if (!/^p[a-z0-9]{10,20}$/.test(id || '')) { id = 'p' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36); lsSet('hollowcreek-player-id', id); }
@@ -1902,39 +2236,56 @@ function p2pRoomNS() {
     }),
   };
 }
-function fbDbNS(fdb) {
+/* World record outside Claude: a Google Sheet with a small Apps Script web app (see setup notes). */
+let recRefresh = null;
+async function recFetch(opts) {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 12000);
+  try {
+    const r = await fetch(opts && opts.body ? REC_URL : REC_URL + '?id=' + encodeURIComponent(playerId()),
+      Object.assign({ redirect: 'follow', signal: ctl.signal }, opts || {}));
+    if (!r.ok) throw new Error('http ' + r.status);
+    const d = await r.json();
+    return d && typeof d === 'object' ? d : {};
+  } finally { clearTimeout(t); }
+}
+function sheetDbNS() {
+  let last = null; const subs = new Set();
+  const publish = d => {
+    last = d;
+    const top = d.top && isFinite(+d.top.best) && +d.top.best > 0 ? d.top : null;
+    const docs = top ? [{ id: String(top.id || ''), exists: true, data: () => ({ best: Math.floor(+top.best), name: top.name }) }] : [];
+    subs.forEach(cb => { try { cb({ docs, size: docs.length, empty: !docs.length }); } catch (e) { } });
+  };
+  let busy = false;
+  const refresh = async () => { if (busy) return; busy = true; try { publish(await recFetch()); } catch (e) { } finally { busy = false; } };
+  recRefresh = refresh;
+  setInterval(() => { if (!document.hidden && (!$('#modeMenu').hidden || !$('#results').hidden)) refresh(); }, 60000);
   return {
-    collection: c => ({
-      orderBy: f => ({
-        limit: n => ({
-          onSnapshot: (cb, err) => {
-            const q = fdb.ref(c).orderByChild(f).limitToLast(n);
-            const h = snap => { const docs = []; snap.forEach(ch => { const v = ch.val(); docs.unshift({ id: ch.key, exists: true, data: () => v }); }); cb({ docs, size: docs.length, empty: !docs.length }); };
-            q.on('value', h, e => err && err(e));
-            return () => q.off('value', h);
-          },
-        }),
-      }),
-    }),
-    doc: path => ({
-      get: async () => { const sn = await fdb.ref(path).get(); const v = sn.val(); return { exists: sn.exists(), data: () => v }; },
-      set: async d => fdb.ref(path).set(Object.assign({}, d, { name: nick() })),
+    collection: () => ({ orderBy: () => ({ limit: () => ({
+      onSnapshot: cb => { subs.add(cb); if (last) publish(last); else refresh(); return () => subs.delete(cb); },
+    }) }) }),
+    doc: () => ({
+      get: async () => { const d = await recFetch(); publish(d); const m = Math.floor(+d.mine || 0); return { exists: m > 0, data: () => ({ best: m }) }; },
+      set: async body => {
+        const d = await recFetch({ method: 'POST', body: JSON.stringify({ id: playerId(), name: nick(), best: Math.floor(+body.best || 0) }) });
+        if (d.ok === false) throw new Error('rejected');
+        publish(d);
+      },
     }),
   };
 }
+let sheetNS = null;
 const cap = name => {
   if (IN_CLAUDE) return Promise.resolve(window.claude.use(name)).catch(() => null);
   if (name === 'room') return loadPeerJS().then(ok => ok ? p2pRoomNS() : null);
-  return loadFirebase().then(fdb => {
-    if (!fdb) return null;
-    if (name === 'db') return fbDbNS(fdb);
-    if (name === 'user') return { id: async () => playerId(), profiles: async () => ({}) };
-    return null;
-  });
+  if (!REC_URL) return Promise.resolve(null);
+  if (name === 'db') return Promise.resolve(sheetNS || (sheetNS = sheetDbNS()));
+  if (name === 'user') return Promise.resolve({ id: async () => playerId(), profiles: async () => ({}) });
+  return Promise.resolve(null);
 };
 const NICK_KEY = 'hollow-creek-farm-nick', HOST_CODE_KEY = 'hollow-creek-farm-host-code';
 const FCOL = ['#c4473a', '#3b8ed0', '#4caf50', '#9b5aa8', '#e08a2a', '#2fb5a8', '#d85a9a', '#d9b43a'];
-const RES = ['coins', 'xp', 'lvl', 'tools', 'water', 'seeds', 'produce', 'items', 'st', 'goal', 'sel', 'seedSel'];
+const RES = ['coins', 'xp', 'lvl', 'tools', 'water', 'seeds', 'produce', 'items', 'st', 'goal', 'sel', 'seedSel', 'bridge', 'cherryAt'];
 const DIRS = ['down', 'up', 'left', 'right'];
 const ITK = ['scarecrow', 'sprinkler', 'sprinkler2'];
 const CIDX = Object.fromEntries(CROPS.map((c, k) => [c.id, k + 1]));
@@ -2195,7 +2546,7 @@ function enterGuest(code) {
     const d = JSON.parse(lsGet(guestKey(code)) || 'null');
     if (d && typeof d === 'object') for (const k of RES) if (d[k] != null) S[k] = d[k];
   } catch (e) { }
-  S.tools = Object.assign({ can: 0, hoe: 0, boots: 0 }, S.tools);
+  S.tools = Object.assign({ can: 0, hoe: 0, boots: 0, rod: 0 }, S.tools);
   S.items = Object.assign({ fert: 0, scarecrow: 0, sprinkler: 0, sprinkler2: 0 }, S.items);
   S.st = Object.assign({ harv: 0, ship: 0, till: 0, plant: 0, earned: 0, sprink: 0, crop: {} }, S.st);
   rebuildObjects();
@@ -2224,7 +2575,7 @@ function renderScores() {
   const pb = Math.max(localBest(), REC.mine);
   $('#pbVal').textContent = pb ? fmt(pb) : 'None yet';
   const wv = $('#wrVal'), wb = $('#wrBy');
-  if (!REC.db) { wv.textContent = 'Offline'; wb.textContent = 'Shows when signed in'; return; }
+  if (!REC.db) { wv.textContent = 'Offline'; wb.textContent = IN_CLAUDE ? 'Shows when signed in' : 'Could not reach the scoreboard'; return; }
   if (!REC.top) { wv.textContent = 'None yet'; wb.textContent = 'Be the first'; return; }
   wv.textContent = fmt(REC.top.score);
   wb.textContent = REC.top.id === REC.uid ? 'Held by you' : 'Held by ' + (REC.top.name || REC.topName || 'another farmer');
@@ -2266,7 +2617,7 @@ async function submitRecord(score) {
 
 /* ---------------- Boot ---------------- */
 const ONLINE = true;
-if (!IN_CLAUDE && !FB_CFG) document.documentElement.classList.add('no-records');
+if (!IN_CLAUDE && !REC_URL) document.documentElement.classList.add('no-records');
 let started = false;
 function start(data) {
   if (started) return; started = true;
